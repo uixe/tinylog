@@ -147,6 +147,18 @@ static const char *tlog_level_str[] = {
     "FATAL",
 };
 
+/* log color */
+static const char * log_color[] = {
+	"\033[0;34m", // blue
+	"\033[0;37m", // light gray
+	"\033[1;35m", // light purple
+	"\033[0,33m", // yellow
+	"\033[1;31m", // light red 
+	"\033[0;31m" // red
+	};
+/* log end */
+#define LOG_END "\033[0m"
+
 static inline void _tlog_spin_lock(unsigned int *lock)
 {
     while (1) {
@@ -349,6 +361,8 @@ static int _tlog_format(char *buff, int maxlen, struct tlog_loginfo *info, void 
 
     unused = userptr;
 
+    /* modified by wanfw 2021-09-23 begin, do not write the file and the line number */
+#if 0
     if (tlog.root->multi_log) {
         /* format prefix */
         len = snprintf(buff, maxlen, "[%.4d-%.2d-%.2d %.2d:%.2d:%.2d,%.3d][%5d][%4s][%17s:%-4d] ",
@@ -360,6 +374,19 @@ static int _tlog_format(char *buff, int maxlen, struct tlog_loginfo *info, void 
             tm->year, tm->mon, tm->mday, tm->hour, tm->min, tm->sec, tm->usec / 1000,
             tlog_get_level_string(info->level), info->file, info->line);
     }
+#endif
+    if (tlog.root->multi_log) {
+        /* format prefix */
+        len = snprintf(buff, maxlen, "[%.4d-%.2d-%.2d %.2d:%.2d:%.2d,%.3d][%5d][%4s] %s",
+            tm->year, tm->mon, tm->mday, tm->hour, tm->min, tm->sec, tm->usec / 1000, getpid(),
+            tlog_get_level_string(info->level), log_color[info->level] );
+    } else {
+        /* format prefix */
+        len = snprintf(buff, maxlen, "[%.4d-%.2d-%.2d %.2d:%.2d:%.2d,%.3d][%5s] %s",
+            tm->year, tm->mon, tm->mday, tm->hour, tm->min, tm->sec, tm->usec / 1000,
+            tlog_get_level_string(info->level), log_color[info->level] );
+    }
+    /* modified by wanfw 2021-09-23 end */
 
     if (len < 0 || len >= maxlen) {
         return -1;
