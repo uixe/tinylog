@@ -402,6 +402,13 @@ static int _tlog_format(char *buff, int maxlen, struct tlog_loginfo *info, void 
     }
     buff += len;
     total_len += len;
+	
+	/* added by wanfw 20210928 begin, add the color end label */
+    memcpy(buff,LOG_END,strlen(LOG_END));
+    buff += strlen(LOG_END);
+
+    total_len += strlen(LOG_END);
+	/* added by wanfw 20210928 end */
 
     /* return total length */
     return total_len;
