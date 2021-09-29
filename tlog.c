@@ -159,6 +159,8 @@ static const char * log_color[] = {
 /* log end */
 #define LOG_END "\033[0m"
 
+static struct tm last_log_file_time = {0}; /* last log file time */
+
 static inline void _tlog_spin_lock(unsigned int *lock)
 {
     while (1) {
@@ -558,6 +560,7 @@ static int _tlog_vprintf(struct tlog_log *log, vprint_callback print_callback, v
         }
 
         /* if free buffer length is less than min line length */
+        /* 剩余空闲缓存空间不足一行内容，需要通知写文件线程先将现有缓存内容写入文件后，载来写本次的缓存 */
         if (maxlen < log->max_line_size) {
             if (log->end != log->start) {
                 tlog.notify_log = log;
@@ -575,6 +578,7 @@ static int _tlog_vprintf(struct tlog_log *log, vprint_callback print_callback, v
             pthread_mutex_lock(&log->lock);
             log->waiters++;
             /* block wait for free buffer */
+            /* 等待空闲缓存空间释放出来，再做后续写入缓存的操作 */
             int ret = pthread_cond_wait(&log->client_cond, &log->lock);
             log->waiters--;
             pthread_mutex_unlock(&log->lock);
@@ -1005,8 +1009,18 @@ static int _tlog_archive_log_compressed(struct tlog_log *log)
     char log_file[TLOG_BUFF_LEN];
     char pending_file[TLOG_BUFF_LEN];
 
+    /* modified by wanfw 2021-09-29 begin, set the pending file name as logname.date */
+    #if 0
     snprintf(gzip_file, sizeof(gzip_file), "%s/%s.pending.gz", log->logdir, log->logname);
     snprintf(pending_file, sizeof(pending_file), "%s/%s.pending", log->logdir, log->logname);
+    #endif
+    snprintf(gzip_file, sizeof(gzip_file), "%s/%s.%04d-%02d-%02d_%02d.gz", 
+        log->logdir, log->logname, last_log_file_time.tm_year+1900, last_log_file_time.tm_mon+1, last_log_file_time.tm_mday,
+        last_log_file_time.tm_hour );
+    snprintf(pending_file, sizeof(pending_file), "%s/%s.%04d-%02d-%02d_%02d", 
+        log->logdir, log->logname, last_log_file_time.tm_year+1900, last_log_file_time.tm_mon+1, last_log_file_time.tm_mday,
+        last_log_file_time.tm_hour );
+    /* modified by wanfw 2021-09-29 end */
 
     if (_tlog_log_lock(log) != 0) {
         return -1;
@@ -1054,7 +1068,14 @@ static int _tlog_archive_log_nocompress(struct tlog_log *log)
     char log_file[TLOG_BUFF_LEN];
     char pending_file[TLOG_BUFF_LEN];
 
+    /* modified by wanfw 2021-09-29 begin, set the pending file name as logname.date */
+    #if 0
     snprintf(pending_file, sizeof(pending_file), "%s/%s.pending", log->logdir, log->logname);
+    #endif
+    snprintf(pending_file, sizeof(pending_file), "%s/%s.%04d-%02d-%02d_%02d", 
+        log->logdir, log->logname,last_log_file_time.tm_year+1900, last_log_file_time.tm_mon+1, last_log_file_time.tm_mday,
+        last_log_file_time.tm_hour );
+    /* modified by wanfw 2021-09-29 end */
 
     if (_tlog_log_lock(log) != 0) {
         return -1;
@@ -1113,6 +1134,16 @@ void _tlog_get_log_name_dir(struct tlog_log *log)
     pthread_mutex_unlock(&tlog.lock);
 }
 
+/* time compare function */
+static int _tlog_time_cmp(struct tm * current_time, struct tm * cmp_time )
+{
+    time_t time_now = 0, time_obj = 0;
+    time_now = mktime(current_time);
+    time_obj = mktime(cmp_time);
+
+    return (time_now - time_obj);
+}
+
 static int _tlog_write(struct tlog_log *log, const char *buff, int bufflen)
 {
     int len;
@@ -1137,6 +1168,7 @@ static int _tlog_write(struct tlog_log *log, const char *buff, int bufflen)
         log->filesize = lseek(log->fd, 0, SEEK_END);
     }
 
+#if 0 /* Do not use the size to split the log file */
     if (log->filesize > log->logsize && log->zip_pid <= 0) {
         if (log->filesize < lseek(log->fd, 0, SEEK_END) && log->multi_log == 0) {
             const char *msg = "[Auto enable multi-process write mode, log may be lost, please enable multi-process write mode manually]\n";
@@ -1146,6 +1178,43 @@ static int _tlog_write(struct tlog_log *log, const char *buff, int bufflen)
         close(log->fd);
         log->fd = -1;
         log->filesize = 0;
+        _tlog_archive_log(log);
+    }
+#endif
+
+    /* if the current time is later than the last log file time, close the current file and create a new one  */
+    time_t current_time;
+    struct tm st_time = {0};
+    char logfile[PATH_MAX * 2] = {0};
+
+    time(&current_time);
+    _tlog_localtime(&current_time, &st_time);
+	/* compare date-time by hour */
+    st_time.tm_min = 0;
+    st_time.tm_sec = 0;
+
+    /* if exists log file, get the file time */
+    snprintf(logfile, sizeof(logfile), "%s/%s", log->logdir, log->logname);
+    if(0==access(logfile,F_OK))
+    {
+        struct tlog_time log_mtime={0};
+        if( 0 == _tlog_getmtime(&log_mtime,logfile))
+        {
+            last_log_file_time.tm_year = log_mtime.year - 1900;
+            last_log_file_time.tm_mon = log_mtime.mon - 1;
+            last_log_file_time.tm_mday = log_mtime.mday;
+            last_log_file_time.tm_hour = log_mtime.hour;
+        }
+    }
+    
+    if ( 0 != last_log_file_time.tm_year && _tlog_time_cmp(&last_log_file_time,&st_time) < 0 && log->zip_pid <= 0) {
+        if ( log->multi_log == 0) {
+            const char *msg = "[Auto enable multi-process write mode, log may be lost, please enable multi-process write mode manually]\n";
+            log->multi_log = 1;
+            unused = write(log->fd, msg, strlen(msg));
+        }
+        close(log->fd);
+        log->fd = -1;
         _tlog_archive_log(log);
     }
 
@@ -1159,6 +1228,10 @@ static int _tlog_write(struct tlog_log *log, const char *buff, int bufflen)
             return -1;
         }
         log->last_try = now;
+        /* set the file time */
+        _tlog_localtime(&now, &last_log_file_time);
+        last_log_file_time.tm_min = 0;
+        last_log_file_time.tm_sec = 0;
 
         char logfile[PATH_MAX * 2];
         if (_tlog_mkdir(log->logdir) != 0) {
